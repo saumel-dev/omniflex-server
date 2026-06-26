@@ -253,6 +253,45 @@ async function run() {
             }
         });
 
+        // GET ROUTE: Fetch forum posts created exclusively by the logged-in trainer
+        app.get('/api/trainer-forum-posts', verifyToken, async (req, res) => {
+            try {
+                const userEmail = req.user.email;
+
+                // Query the forum collection using the authorized email string
+                const posts = await forumCollection.find({ authorEmail: userEmail }).toArray();
+                res.status(200).json(posts);
+            } catch (error) {
+                console.error("Error loading trainer forum posts:", error);
+                res.status(500).json({ error: "Failed to load your added forum posts." });
+            }
+        });
+
+        // DELETE ROUTE: Remove a specific forum post matching the trainer's ownership authority
+        app.delete('/api/forum-posts/:id', verifyToken, async (req, res) => {
+            try {
+                const { ObjectId } = require('mongodb');
+                const postId = req.params.id;
+                const userEmail = req.user.email;
+
+                const existingPost = await forumCollection.findOne({ _id: new ObjectId(postId) });
+                if (!existingPost) {
+                    return res.status(404).json({ error: "Forum post structure not found" });
+                }
+
+                // Ownership Guard: Ensure the trainer deleting this post is the one who published it
+                if (existingPost.authorEmail !== userEmail) {
+                    return res.status(403).json({ error: "Forbidden: You do not own this forum post" });
+                }
+
+                await forumCollection.deleteOne({ _id: new ObjectId(postId) });
+                res.status(200).json({ success: true, message: "Forum post deleted successfully" });
+            } catch (error) {
+                console.error("Error deleting forum post:", error);
+                res.status(500).json({ error: "Failed to complete post elimination execution" });
+            }
+        });
+
 
     } finally {
         // Keep connection open
