@@ -292,6 +292,131 @@ async function run() {
             }
         });
 
+        app.get('/api/trainer-overview', verifyToken, async (req, res) => {
+            try {
+                const userEmail = req.user.email;
+
+                // 1. Fetch trainer profile from DB
+                const dbUser = await usersCollection.findOne({ email: userEmail });
+                if (!dbUser) {
+                    return res.status(404).json({ error: "Trainer profile not found" });
+                }
+
+                // 2. Aggregate total classes + total students enrolled (sum of bookingCount)
+                const classStats = await classesCollection.aggregate([
+                    { $match: { trainerEmail: userEmail } },
+                    {
+                        $group: {
+                            _id: null,
+                            totalClasses: { $sum: 1 },
+                            totalStudents: { $sum: "$bookingCount" }
+                        }
+                    }
+                ]).toArray();
+
+                const totalClasses = classStats[0]?.totalClasses || 0;
+                const totalStudents = classStats[0]?.totalStudents || 0;
+
+                // 3. Count total forum posts by this trainer
+                const totalForumPosts = await forumCollection.countDocuments({ authorEmail: userEmail });
+
+                // 4. Fetch 3 most recent classes as preview
+                const classesPreview = await classesCollection
+                    .find({ trainerEmail: userEmail })
+                    .sort({ createdAt: -1 })
+                    .limit(3)
+                    .toArray();
+
+                // 5. Send unified response
+                res.status(200).json({
+                    profile: {
+                        name: dbUser.name || req.user.name || "Trainer",
+                        email: dbUser.email,
+                        role: dbUser.role,
+                        image: dbUser.image || null
+                    },
+                    stats: { totalClasses, totalStudents, totalForumPosts },
+                    classesPreview
+                });
+
+            } catch (error) {
+                console.error("Error loading trainer overview:", error);
+                res.status(500).json({ error: "Failed to load trainer dashboard overview" });
+            }
+        });
+
+        //admin
+
+        const requireAdmin = async (req, res, next) => {
+            try {
+                const dbUser = await usersCollection.findOne({ email: req.user.email });
+                if (!dbUser) return res.status(404).json({ error: "User not found" });
+                if (dbUser.role !== 'admin') return res.status(403).json({ error: "Access forbidden: Admins only" });
+                if (dbUser.status === 'blocked') return res.status(403).json({ error: "Action restricted by Admin" });
+                req.dbUser = dbUser;
+                next();
+            } catch (error) {
+                console.error("Admin middleware error:", error);
+                return res.status(500).json({ error: "Internal server error in admin check" });
+            }
+        };
+
+        // GET: All users (with optional search)
+        app.get('/api/admin/users', verifyToken, requireAdmin, async (req, res) => {
+            try {
+                const search = req.query.search || "";
+                const query = search
+                    ? {
+                        $or: [
+                            { name: { $regex: search, $options: "i" } },
+                            { email: { $regex: search, $options: "i" } },
+                        ],
+                    }
+                    : {};
+                const users = await usersCollection.find(query).sort({ createdAt: -1 }).toArray();
+                res.status(200).json(users);
+            } catch (error) {
+                console.error("Error fetching users:", error);
+                res.status(500).json({ error: "Failed to fetch users" });
+            }
+        });
+
+        // PATCH: Block or Unblock a user
+        app.patch('/api/admin/users/:id/status', verifyToken, requireAdmin, async (req, res) => {
+            try {
+                const { ObjectId } = require('mongodb');
+                const { status } = req.body;
+                if (!["blocked", "active"].includes(status)) {
+                    return res.status(400).json({ error: "Invalid status value" });
+                }
+                const result = await usersCollection.updateOne(
+                    { _id: new ObjectId(req.params.id) },
+                    { $set: { status, updatedAt: new Date() } }
+                );
+                if (result.matchedCount === 0) return res.status(404).json({ error: "User not found" });
+                res.status(200).json({ success: true, message: `User ${status === 'blocked' ? 'blocked' : 'unblocked'} successfully` });
+            } catch (error) {
+                console.error("Error updating user status:", error);
+                res.status(500).json({ error: "Failed to update user status" });
+            }
+        });
+
+        // PATCH: Promote a user to admin
+        app.patch('/api/admin/users/:id/make-admin', verifyToken, requireAdmin, async (req, res) => {
+            try {
+                const { ObjectId } = require('mongodb');
+                const result = await usersCollection.updateOne(
+                    { _id: new ObjectId(req.params.id) },
+                    { $set: { role: "admin", updatedAt: new Date() } }
+                );
+                if (result.matchedCount === 0) return res.status(404).json({ error: "User not found" });
+                res.status(200).json({ success: true, message: "User promoted to Admin successfully" });
+            } catch (error) {
+                console.error("Error promoting user:", error);
+                res.status(500).json({ error: "Failed to promote user" });
+            }
+        });
+
 
     } finally {
         // Keep connection open
