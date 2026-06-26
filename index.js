@@ -64,7 +64,7 @@ async function run() {
         const classesCollection = db.collection("classes");
         const usersCollection = db.collection("user");
         const forumCollection = db.collection("forum");
-        
+
         console.log("Pinged your deployment. You successfully connected to MongoDB!");
 
         //adding class by trainer
@@ -197,6 +197,62 @@ async function run() {
                 res.status(500).json({ error: "Failed to delete class" });
             }
         });
+
+        // POST ROUTE: Add a new Forum Post by trainer
+        app.post('/api/forum-posts', verifyToken, async (req, res) => {
+            try {
+                const userEmail = req.user.email;
+
+                // 1. Fetch user from database to verify role and soft block status
+                const dbUser = await usersCollection.findOne({ email: userEmail });
+                if (!dbUser) {
+                    return res.status(404).json({ error: "User profile not found in database" });
+                }
+
+                // Soft Block Rule Check
+                if (dbUser.status === 'blocked') {
+                    return res.status(403).json({ error: "Action restricted by Admin" });
+                }
+
+                // Role Check Rule: Only trainers or admins can publish forum articles
+                if (dbUser.role !== 'trainer' && dbUser.role !== 'admin') {
+                    return res.status(403).json({ error: "Access forbidden: Only trainers and admins can create forum posts" });
+                }
+
+                const postData = req.body;
+
+                // Server-side validation of text parameters
+                if (!postData.description || postData.description.length < 100) {
+                    return res.status(400).json({ error: "Description must be at least 100 characters long." });
+                }
+
+                // 2. Structuring the payload perfectly matching native collections fields
+                const newPost = {
+                    title: postData.title,
+                    image: postData.image,
+                    description: postData.description,
+
+                    // Author Context parameters injected securely via verified token profile
+                    authorName: dbUser.name || "Unknown Instructor",
+                    authorEmail: userEmail,
+                    authorRole: dbUser.role,
+                    authorImage: dbUser.image || null, // Injects user profile picture if configured
+
+                    // Interaction Defaults
+                    likes: 0,
+                    dislikes: 0,
+                    createdAt: new Date()
+                };
+
+                const result = await forumCollection.insertOne(newPost);
+                res.status(201).json({ success: true, insertedId: result.insertedId });
+
+            } catch (error) {
+                console.error("Error saving forum post natively:", error);
+                res.status(500).json({ error: "Internal server error processing forum documentation" });
+            }
+        });
+
 
     } finally {
         // Keep connection open
