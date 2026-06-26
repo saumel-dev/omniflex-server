@@ -63,7 +63,8 @@ async function run() {
 
         const classesCollection = db.collection("classes");
         const usersCollection = db.collection("user");
-
+        const forumCollection = db.collection("forum");
+        
         console.log("Pinged your deployment. You successfully connected to MongoDB!");
 
         //adding class by trainer
