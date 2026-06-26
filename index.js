@@ -123,6 +123,58 @@ async function run() {
             }
         });
 
+        //loading class of trainer
+        app.get('/api/trainer-classes', verifyToken, async (req, res) => {
+            try {
+                const userEmail = req.user.email;
+
+                // Find only classes matching this specific trainer's email
+                const classes = await classesCollection.find({ trainerEmail: userEmail }).toArray();
+                res.status(200).json(classes);
+            } catch (error) {
+                console.error("Error fetching trainer classes:", error);
+                res.status(500).json({ error: "Failed to fetch classes" });
+            }
+        });
+
+        // editing class of trainer
+        app.patch('/api/classes/:id', verifyToken, async (req, res) => {
+            try {
+                const { ObjectId } = require('mongodb');
+                const classId = req.params.id;
+                const userEmail = req.user.email;
+                const updateData = req.body;
+
+                // Ensure the trainer updating this class is the one who created it
+                const existingClass = await classesCollection.findOne({ _id: new ObjectId(classId) });
+                if (!existingClass) {
+                    return res.status(404).json({ error: "Class not found" });
+                }
+                if (existingClass.trainerEmail !== userEmail) {
+                    return res.status(403).json({ error: "Forbidden: You do not own this class" });
+                }
+
+                const updatedDoc = {
+                    $set: {
+                        className: updateData.className,
+                        category: updateData.category,
+                        difficulty: updateData.difficulty,
+                        duration: updateData.duration,
+                        price: parseFloat(updateData.price),
+                        time: updateData.time,
+                        description: updateData.description,
+                    }
+                };
+
+                await classesCollection.updateOne({ _id: new ObjectId(classId) }, updatedDoc);
+                res.status(200).json({ success: true, message: "Class updated successfully" });
+            } catch (error) {
+                console.error("Error updating class:", error);
+                res.status(500).json({ error: "Failed to update class" });
+            }
+        });
+
+
     } finally {
         // Keep connection open
     }
