@@ -174,6 +174,28 @@ async function run() {
             }
         });
 
+        // deleting class by trainer
+        app.delete('/api/classes/:id', verifyToken, async (req, res) => {
+            try {
+                const { ObjectId } = require('mongodb');
+                const classId = req.params.id;
+                const userEmail = req.user.email;
+
+                const existingClass = await classesCollection.findOne({ _id: new ObjectId(classId) });
+                if (!existingClass) {
+                    return res.status(404).json({ error: "Class not found" });
+                }
+                if (existingClass.trainerEmail !== userEmail) {
+                    return res.status(403).json({ error: "Forbidden: You do not own this class" });
+                }
+
+                await classesCollection.deleteOne({ _id: new ObjectId(classId) });
+                res.status(200).json({ success: true, message: "Class deleted successfully" });
+            } catch (error) {
+                console.error("Error deleting class:", error);
+                res.status(500).json({ error: "Failed to delete class" });
+            }
+        });
 
     } finally {
         // Keep connection open
