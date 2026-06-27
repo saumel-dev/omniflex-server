@@ -895,41 +895,75 @@ async function run() {
         });
 
         // GET: All favorite classes for the logged-in user (with full class data)
-app.get('/api/favorites', verifyToken, async (req, res) => {
-    try {
-        const userEmail = req.user.email;
-        const favoritesCollection = db.collection("favorites");
+        app.get('/api/favorites', verifyToken, async (req, res) => {
+            try {
+                const userEmail = req.user.email;
+                const favoritesCollection = db.collection("favorites");
 
-        // Get all favorite entries for this user
-        const favorites = await favoritesCollection
-            .find({ userEmail })
-            .sort({ savedAt: -1 })
-            .toArray();
+                // Get all favorite entries for this user
+                const favorites = await favoritesCollection
+                    .find({ userEmail })
+                    .sort({ savedAt: -1 })
+                    .toArray();
 
-        if (favorites.length === 0) return res.status(200).json([]);
+                if (favorites.length === 0) return res.status(200).json([]);
 
-        // Fetch full class data for each favorited classId
-        const { ObjectId } = require('mongodb');
-        const classIds = favorites.map((f) => {
-            try { return new ObjectId(f.classId); } catch { return null; }
-        }).filter(Boolean);
+                // Fetch full class data for each favorited classId
+                const { ObjectId } = require('mongodb');
+                const classIds = favorites.map((f) => {
+                    try { return new ObjectId(f.classId); } catch { return null; }
+                }).filter(Boolean);
 
-        const classes = await classesCollection
-            .find({ _id: { $in: classIds } })
-            .toArray();
+                const classes = await classesCollection
+                    .find({ _id: { $in: classIds } })
+                    .toArray();
 
-        // Merge savedAt from favorites into each class doc
-        const enriched = classes.map((cls) => {
-            const fav = favorites.find((f) => f.classId === cls._id.toString());
-            return { ...cls, savedAt: fav?.savedAt || null };
+                // Merge savedAt from favorites into each class doc
+                const enriched = classes.map((cls) => {
+                    const fav = favorites.find((f) => f.classId === cls._id.toString());
+                    return { ...cls, savedAt: fav?.savedAt || null };
+                });
+
+                res.status(200).json(enriched);
+            } catch (error) {
+                console.error("Error fetching favorites:", error);
+                res.status(500).json({ error: "Failed to fetch favorite classes." });
+            }
         });
 
-        res.status(200).json(enriched);
-    } catch (error) {
-        console.error("Error fetching favorites:", error);
-        res.status(500).json({ error: "Failed to fetch favorite classes." });
-    }
-});
+        app.get('/api/forum-posts', async (req, res) => {
+            try {
+                const page = parseInt(req.query.page) || 1;
+                const limit = 6;
+                const skip = (page - 1) * limit;
+                const search = req.query.search || "";
+
+                // Build search filter if query provided
+                const filter = search
+                    ? {
+                        $or: [
+                            { title: { $regex: search, $options: "i" } },
+                            { authorName: { $regex: search, $options: "i" } },
+                        ]
+                    }
+                    : {};
+
+                const [posts, total] = await Promise.all([
+                    forumCollection.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).toArray(),
+                    forumCollection.countDocuments(filter),
+                ]);
+
+                res.status(200).json({
+                    posts,
+                    total,
+                    totalPages: Math.ceil(total / limit),
+                    currentPage: page,
+                });
+            } catch (error) {
+                console.error("Error fetching public forum posts:", error);
+                res.status(500).json({ error: "Failed to load forum posts." });
+            }
+        });
 
 
     } finally {
