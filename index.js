@@ -65,7 +65,7 @@ async function run() {
         const usersCollection = db.collection("user");
         const forumCollection = db.collection("forum");
         const applicationsCollection = db.collection("trainer-applications");
-        
+
         console.log("Pinged your deployment. You successfully connected to MongoDB!");
 
         //adding class by trainer
@@ -495,6 +495,302 @@ async function run() {
             } catch (error) {
                 console.error("Error fetching application status:", error);
                 res.status(500).json({ error: "Failed to fetch application status" });
+            }
+        });
+
+        app.get('/api/admin/trainer-applications', verifyToken, async (req, res) => {
+            try {
+                const requesterEmail = req.user.email;
+
+                // Verify admin role
+                const adminUser = await usersCollection.findOne({ email: requesterEmail });
+                if (!adminUser || adminUser.role !== 'admin') {
+                    return res.status(403).json({ error: "Access forbidden: Requires Administrator privileges." });
+                }
+
+                // Only return pending ones — decided ones are archived
+                const applications = await applicationsCollection
+                    .find({ status: "pending" })
+                    .sort({ appliedAt: -1 })
+                    .toArray();
+
+                res.status(200).json(applications);
+            } catch (error) {
+                console.error("Error fetching trainer applications:", error);
+                res.status(500).json({ error: "Failed to load trainer applications." });
+            }
+        });
+
+        // PATCH: Admin approves or rejects a trainer application
+        app.patch('/api/admin/trainer-applications/:id', verifyToken, async (req, res) => {
+            try {
+                const { ObjectId } = require('mongodb');
+                const applicationId = req.params.id;
+                const requesterEmail = req.user.email;
+                const { action, feedback } = req.body; // action: "approve" | "reject"
+
+                // Verify admin role
+                const adminUser = await usersCollection.findOne({ email: requesterEmail });
+                if (!adminUser || adminUser.role !== 'admin') {
+                    return res.status(403).json({ error: "Access forbidden: Requires Administrator privileges." });
+                }
+
+                // Find the application
+                const application = await applicationsCollection.findOne({ _id: new ObjectId(applicationId) });
+                if (!application) {
+                    return res.status(404).json({ error: "Application not found." });
+                }
+
+                if (action === "approve") {
+                    // 1. Update the application status to approved
+                    await applicationsCollection.updateOne(
+                        { _id: new ObjectId(applicationId) },
+                        { $set: { status: "approved", adminFeedback: null, decidedAt: new Date() } }
+                    );
+
+                    // 2. Promote the user's role to trainer in omniflex.user collection
+                    await usersCollection.updateOne(
+                        { email: application.applicantEmail },
+                        { $set: { role: "trainer", updatedAt: new Date() } }
+                    );
+
+                    return res.status(200).json({ success: true, message: "Application approved. User is now a trainer." });
+
+                } else if (action === "reject") {
+                    if (!feedback || feedback.trim().length === 0) {
+                        return res.status(400).json({ error: "Feedback is required when rejecting an application." });
+                    }
+
+                    // Update application status to rejected with feedback
+                    // The feedback will be shown to the user on their apply-trainer page
+                    await applicationsCollection.updateOne(
+                        { _id: new ObjectId(applicationId) },
+                        {
+                            $set: {
+                                status: "rejected",
+                                adminFeedback: feedback.trim(),
+                                decidedAt: new Date()
+                            }
+                        }
+                    );
+
+                    return res.status(200).json({ success: true, message: "Application rejected with feedback." });
+
+                } else {
+                    return res.status(400).json({ error: "Invalid action. Must be 'approve' or 'reject'." });
+                }
+
+            } catch (error) {
+                console.error("Error processing trainer application:", error);
+                res.status(500).json({ error: "Failed to process application." });
+            }
+        });
+
+        app.get('/api/admin/trainers', verifyToken, async (req, res) => {
+            try {
+                const requesterEmail = req.user.email;
+
+                // Verify admin role
+                const adminUser = await usersCollection.findOne({ email: requesterEmail });
+                if (!adminUser || adminUser.role !== 'admin') {
+                    return res.status(403).json({ error: "Access forbidden: Requires Administrator privileges." });
+                }
+
+                // Fetch all users with role "trainer"
+                const trainers = await usersCollection
+                    .find({ role: "trainer" })
+                    .sort({ createdAt: -1 })
+                    .toArray();
+
+                res.status(200).json(trainers);
+            } catch (error) {
+                console.error("Error fetching trainers:", error);
+                res.status(500).json({ error: "Failed to load trainers." });
+            }
+        });
+
+        // PATCH: Admin demotes a trainer back to user role
+        app.patch('/api/admin/trainers/:id/demote', verifyToken, async (req, res) => {
+            try {
+                const { ObjectId } = require('mongodb');
+                const trainerId = req.params.id;
+                const requesterEmail = req.user.email;
+
+                // Verify admin role
+                const adminUser = await usersCollection.findOne({ email: requesterEmail });
+                if (!adminUser || adminUser.role !== 'admin') {
+                    return res.status(403).json({ error: "Access forbidden: Requires Administrator privileges." });
+                }
+
+                // Find the trainer
+                const trainer = await usersCollection.findOne({ _id: new ObjectId(trainerId) });
+                if (!trainer) {
+                    return res.status(404).json({ error: "Trainer not found." });
+                }
+                if (trainer.role !== 'trainer') {
+                    return res.status(400).json({ error: "This user is not a trainer." });
+                }
+
+                // Demote to user
+                await usersCollection.updateOne(
+                    { _id: new ObjectId(trainerId) },
+                    { $set: { role: "user", updatedAt: new Date() } }
+                );
+
+                res.status(200).json({ success: true, message: "Trainer demoted to user." });
+            } catch (error) {
+                console.error("Error demoting trainer:", error);
+                res.status(500).json({ error: "Failed to demote trainer." });
+            }
+        });
+
+        app.get('/api/admin/classes', verifyToken, async (req, res) => {
+            try {
+                const requesterEmail = req.user.email;
+
+                const adminUser = await usersCollection.findOne({ email: requesterEmail });
+                if (!adminUser || adminUser.role !== 'admin') {
+                    return res.status(403).json({ error: "Access forbidden: Requires Administrator privileges." });
+                }
+
+                const allClasses = await classesCollection
+                    .find({})
+                    .sort({ createdAt: -1 })
+                    .toArray();
+
+                res.status(200).json(allClasses);
+            } catch (error) {
+                console.error("Error fetching all classes:", error);
+                res.status(500).json({ error: "Failed to load classes." });
+            }
+        });
+
+        // PATCH: Admin approves or rejects a class
+        app.patch('/api/admin/classes/:id', verifyToken, async (req, res) => {
+            try {
+                const { ObjectId } = require('mongodb');
+                const classId = req.params.id;
+                const requesterEmail = req.user.email;
+                const { status } = req.body; // "approved" | "rejected"
+
+                const adminUser = await usersCollection.findOne({ email: requesterEmail });
+                if (!adminUser || adminUser.role !== 'admin') {
+                    return res.status(403).json({ error: "Access forbidden: Requires Administrator privileges." });
+                }
+
+                if (!["approved", "rejected"].includes(status)) {
+                    return res.status(400).json({ error: "Invalid status. Must be 'approved' or 'rejected'." });
+                }
+
+                const result = await classesCollection.updateOne(
+                    { _id: new ObjectId(classId) },
+                    { $set: { status, updatedAt: new Date() } }
+                );
+
+                if (result.matchedCount === 0) {
+                    return res.status(404).json({ error: "Class not found." });
+                }
+
+                res.status(200).json({ success: true, message: `Class ${status} successfully.` });
+            } catch (error) {
+                console.error("Error updating class status:", error);
+                res.status(500).json({ error: "Failed to update class." });
+            }
+        });
+
+        // DELETE: Admin permanently deletes a class
+        app.delete('/api/admin/classes/:id', verifyToken, async (req, res) => {
+            try {
+                const { ObjectId } = require('mongodb');
+                const classId = req.params.id;
+                const requesterEmail = req.user.email;
+
+                const adminUser = await usersCollection.findOne({ email: requesterEmail });
+                if (!adminUser || adminUser.role !== 'admin') {
+                    return res.status(403).json({ error: "Access forbidden: Requires Administrator privileges." });
+                }
+
+                const result = await classesCollection.deleteOne({ _id: new ObjectId(classId) });
+
+                if (result.deletedCount === 0) {
+                    return res.status(404).json({ error: "Class not found." });
+                }
+
+                res.status(200).json({ success: true, message: "Class deleted successfully." });
+            } catch (error) {
+                console.error("Error deleting class:", error);
+                res.status(500).json({ error: "Failed to delete class." });
+            }
+        });
+
+        // GET: Admin fetches all forum posts
+        app.get('/api/admin/forum-posts', verifyToken, requireAdmin, async (req, res) => {
+            try {
+                const posts = await forumCollection
+                    .find({})
+                    .sort({ createdAt: -1 })
+                    .toArray();
+                res.status(200).json(posts);
+            } catch (error) {
+                console.error("Error fetching all forum posts:", error);
+                res.status(500).json({ error: "Failed to load forum posts." });
+            }
+        });
+
+        // DELETE: Admin removes any forum post (no ownership check needed)
+        app.delete('/api/admin/forum-posts/:id', verifyToken, requireAdmin, async (req, res) => {
+            try {
+                const { ObjectId } = require('mongodb');
+                const result = await forumCollection.deleteOne({ _id: new ObjectId(req.params.id) });
+                if (result.deletedCount === 0) {
+                    return res.status(404).json({ error: "Post not found." });
+                }
+                res.status(200).json({ success: true, message: "Forum post deleted successfully." });
+            } catch (error) {
+                console.error("Error deleting forum post:", error);
+                res.status(500).json({ error: "Failed to delete forum post." });
+            }
+        });
+
+        // GET: Public classes page — approved only, with search, filter, pagination
+        app.get('/api/classes/public', async (req, res) => {
+            try {
+                const search = req.query.search || "";
+                const category = req.query.category || "";
+                const page = parseInt(req.query.page) || 1;
+                const limit = parseInt(req.query.limit) || 9;
+                const skip = (page - 1) * limit;
+
+                // Base filter: only approved classes
+                const query = { status: "approved" };
+
+                // Search by class name
+                if (search) {
+                    query.className = { $regex: search, $options: "i" };
+                }
+
+                // Filter by category (case-insensitive exact match)
+                if (category && category !== "All") {
+                    query.category = { $regex: `^${category}$`, $options: "i" };
+                }
+
+                const total = await classesCollection.countDocuments(query);
+                const classes = await classesCollection
+                    .find(query)
+                    .sort({ createdAt: -1 })
+                    .skip(skip)
+                    .limit(limit)
+                    .toArray();
+
+                res.status(200).json({
+                    classes,
+                    total,
+                    page,
+                    totalPages: Math.ceil(total / limit),
+                });
+            } catch (error) {
+                console.error("Error fetching public classes:", error);
+                res.status(500).json({ error: "Failed to load classes." });
             }
         });
 
