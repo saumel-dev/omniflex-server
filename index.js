@@ -794,6 +794,106 @@ async function run() {
             }
         });
 
+        // GET: Single class details (public)
+        app.get('/api/classes/public/:id', async (req, res) => {
+            try {
+                const { ObjectId } = require('mongodb');
+                const cls = await classesCollection.findOne({ _id: new ObjectId(req.params.id) });
+                if (!cls) return res.status(404).json({ error: "Class not found." });
+                res.status(200).json(cls);
+            } catch (error) {
+                console.error("Error fetching class:", error);
+                res.status(500).json({ error: "Failed to fetch class details." });
+            }
+        });
+
+        // GET: Related classes — same category, approved, exclude current (public)
+        app.get('/api/classes/public/:id/related', async (req, res) => {
+            try {
+                const { ObjectId } = require('mongodb');
+                const cls = await classesCollection.findOne({ _id: new ObjectId(req.params.id) });
+                if (!cls) return res.status(404).json({ error: "Class not found." });
+
+                const related = await classesCollection
+                    .find({
+                        category: cls.category,
+                        status: "approved",
+                        _id: { $ne: new ObjectId(req.params.id) }
+                    })
+                    .limit(3)
+                    .toArray();
+
+                res.status(200).json(related);
+            } catch (error) {
+                console.error("Error fetching related classes:", error);
+                res.status(500).json({ error: "Failed to fetch related classes." });
+            }
+        });
+
+        // POST: Add a class to user's favorites
+        app.post('/api/favorites', verifyToken, async (req, res) => {
+            try {
+                const { ObjectId } = require('mongodb');
+                const userEmail = req.user.email;
+                const { classId } = req.body;
+
+                if (!classId) return res.status(400).json({ error: "classId is required." });
+
+                const dbUser = await usersCollection.findOne({ email: userEmail });
+                if (!dbUser) return res.status(404).json({ error: "User not found." });
+                if (dbUser.status === 'blocked') return res.status(403).json({ error: "Action restricted by Admin." });
+
+                const favoritesCollection = db.collection("favorites");
+
+                // Prevent duplicates
+                const existing = await favoritesCollection.findOne({ userEmail, classId });
+                if (existing) return res.status(400).json({ error: "Already in favorites." });
+
+                await favoritesCollection.insertOne({
+                    userEmail,
+                    classId,
+                    savedAt: new Date()
+                });
+
+                res.status(201).json({ success: true, message: "Added to favorites." });
+            } catch (error) {
+                console.error("Error adding favorite:", error);
+                res.status(500).json({ error: "Failed to add to favorites." });
+            }
+        });
+
+        // DELETE: Remove a class from favorites
+        app.delete('/api/favorites/:classId', verifyToken, async (req, res) => {
+            try {
+                const userEmail = req.user.email;
+                const { classId } = req.params;
+
+                const favoritesCollection = db.collection("favorites");
+                await favoritesCollection.deleteOne({ userEmail, classId });
+
+                res.status(200).json({ success: true, message: "Removed from favorites." });
+            } catch (error) {
+                console.error("Error removing favorite:", error);
+                res.status(500).json({ error: "Failed to remove from favorites." });
+            }
+        });
+
+        // GET: Check if a class is favorited by current user
+        app.get('/api/favorites/check/:classId', verifyToken, async (req, res) => {
+            try {
+                const userEmail = req.user.email;
+                const { classId } = req.params;
+
+                const favoritesCollection = db.collection("favorites");
+                const existing = await favoritesCollection.findOne({ userEmail, classId });
+
+                res.status(200).json({ isFavorited: !!existing });
+            } catch (error) {
+                console.error("Error checking favorite:", error);
+                res.status(500).json({ error: "Failed to check favorite status." });
+            }
+        });
+
 
     } finally {
         // Keep connection open
