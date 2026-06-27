@@ -64,7 +64,8 @@ async function run() {
         const classesCollection = db.collection("classes");
         const usersCollection = db.collection("user");
         const forumCollection = db.collection("forum");
-
+        const applicationsCollection = db.collection("trainer-applications");
+        
         console.log("Pinged your deployment. You successfully connected to MongoDB!");
 
         //adding class by trainer
@@ -414,6 +415,86 @@ async function run() {
             } catch (error) {
                 console.error("Error promoting user:", error);
                 res.status(500).json({ error: "Failed to promote user" });
+            }
+        });
+
+        // POST: Submit a trainer application
+        app.post('/api/trainer-application', verifyToken, async (req, res) => {
+            try {
+                const userEmail = req.user.email;
+
+                // 1. Verify user exists in DB
+                const dbUser = await usersCollection.findOne({ email: userEmail });
+                if (!dbUser) {
+                    return res.status(404).json({ error: "User profile not found in database" });
+                }
+
+                // 2. Block check
+                if (dbUser.status === 'blocked') {
+                    return res.status(403).json({ error: "Action restricted by Admin" });
+                }
+
+                // 3. Already a trainer or admin — no need to apply
+                if (dbUser.role === 'trainer' || dbUser.role === 'admin') {
+                    return res.status(400).json({ error: "You are already a trainer or admin." });
+                }
+
+                // 4. Check if they already have a pending application
+                const existingApp = await applicationsCollection.findOne({
+                    applicantEmail: userEmail,
+                    status: "pending"
+                });
+                if (existingApp) {
+                    return res.status(400).json({ error: "You already have a pending application." });
+                }
+
+                const { experience, specialty, bio } = req.body;
+
+                // 5. Basic validation
+                if (!experience || !specialty || !bio) {
+                    return res.status(400).json({ error: "All fields are required." });
+                }
+                if (bio.trim().length < 30) {
+                    return res.status(400).json({ error: "Bio must be at least 30 characters." });
+                }
+
+                // 6. Save application
+                const newApplication = {
+                    applicantName: dbUser.name,
+                    applicantEmail: userEmail,
+                    applicantImage: dbUser.image || null,
+                    experience: Number(experience),
+                    specialty,
+                    bio: bio.trim(),
+                    status: "pending", // pending | approved | rejected
+                    adminFeedback: null,
+                    appliedAt: new Date(),
+                };
+
+                const result = await applicationsCollection.insertOne(newApplication);
+                res.status(201).json({ success: true, insertedId: result.insertedId });
+
+            } catch (error) {
+                console.error("Error submitting trainer application:", error);
+                res.status(500).json({ error: "Internal server error submitting application" });
+            }
+        });
+
+        // GET: Check current user's application status
+        app.get('/api/trainer-application/status', verifyToken, async (req, res) => {
+            try {
+                const userEmail = req.user.email;
+
+                // Find their most recent application (could be pending or rejected)
+                const application = await applicationsCollection.findOne(
+                    { applicantEmail: userEmail },
+                    { sort: { appliedAt: -1 } } // most recent first
+                );
+
+                res.status(200).json({ application: application || null });
+            } catch (error) {
+                console.error("Error fetching application status:", error);
+                res.status(500).json({ error: "Failed to fetch application status" });
             }
         });
 
