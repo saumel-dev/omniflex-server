@@ -965,6 +965,211 @@ async function run() {
             }
         });
 
+        const { ObjectId } = require('mongodb');
+
+        // ── GET: Single forum post by ID (public, but token optional for vote state) ──
+        app.get('/api/forum-posts/:id', async (req, res) => {
+            try {
+                const postId = req.params.id;
+                const post = await forumCollection.findOne({ _id: new ObjectId(postId) });
+                if (!post) return res.status(404).json({ error: "Post not found." });
+                res.status(200).json(post);
+            } catch (error) {
+                console.error("Error fetching post:", error);
+                res.status(500).json({ error: "Failed to load post." });
+            }
+        });
+
+        // ── PATCH: Like or Dislike a post (authenticated, one vote per user) ──────────
+        app.patch('/api/forum-posts/:id/vote', verifyToken, async (req, res) => {
+            try {
+                const postId = req.params.id;
+                const userId = req.user.id || req.user.sub;
+                const { type } = req.body; // "like" | "dislike"
+
+                if (!["like", "dislike"].includes(type)) {
+                    return res.status(400).json({ error: "Invalid vote type." });
+                }
+
+                const post = await forumCollection.findOne({ _id: new ObjectId(postId) });
+                if (!post) return res.status(404).json({ error: "Post not found." });
+
+                let likedBy = post.likedBy || [];
+                let dislikedBy = post.dislikedBy || [];
+
+                if (type === "like") {
+                    if (likedBy.includes(userId)) {
+                        // Toggle off
+                        likedBy = likedBy.filter((id) => id !== userId);
+                    } else {
+                        likedBy.push(userId);
+                        // Remove from dislike if switching
+                        dislikedBy = dislikedBy.filter((id) => id !== userId);
+                    }
+                } else {
+                    if (dislikedBy.includes(userId)) {
+                        // Toggle off
+                        dislikedBy = dislikedBy.filter((id) => id !== userId);
+                    } else {
+                        dislikedBy.push(userId);
+                        // Remove from like if switching
+                        likedBy = likedBy.filter((id) => id !== userId);
+                    }
+                }
+
+                await forumCollection.updateOne(
+                    { _id: new ObjectId(postId) },
+                    { $set: { likes: likedBy.length, dislikes: dislikedBy.length, likedBy, dislikedBy } }
+                );
+
+                res.status(200).json({ likes: likedBy.length, dislikes: dislikedBy.length, likedBy, dislikedBy });
+            } catch (error) {
+                console.error("Error voting:", error);
+                res.status(500).json({ error: "Failed to process vote." });
+            }
+        });
+
+        // ── POST: Add a comment to a forum post (authenticated) ───────────────────────
+        app.post('/api/forum-posts/:id/comments', verifyToken, async (req, res) => {
+            try {
+                const postId = req.params.id;
+                const userEmail = req.user.email;
+                const { text } = req.body;
+
+                if (!text || text.trim().length === 0) {
+                    return res.status(400).json({ error: "Comment text is required." });
+                }
+
+                // Check soft block
+                const dbUser = await usersCollection.findOne({ email: userEmail });
+                if (dbUser?.status === 'blocked') {
+                    return res.status(403).json({ error: "Action restricted by Admin." });
+                }
+
+                const newComment = {
+                    _id: new ObjectId().toString(),
+                    authorName: dbUser?.name || req.user.name || "User",
+                    authorEmail: userEmail,
+                    authorImage: dbUser?.image || req.user.image || null,
+                    text: text.trim(),
+                    replies: [],
+                    createdAt: new Date(),
+                };
+
+                await forumCollection.updateOne(
+                    { _id: new ObjectId(postId) },
+                    { $push: { comments: newComment } }
+                );
+
+                res.status(201).json({ success: true, comment: newComment });
+            } catch (error) {
+                console.error("Error posting comment:", error);
+                res.status(500).json({ error: "Failed to post comment." });
+            }
+        });
+
+        // ── DELETE: Delete own comment ─────────────────────────────────────────────────
+        app.delete('/api/forum-posts/:id/comments/:commentId', verifyToken, async (req, res) => {
+            try {
+                const postId = req.params.id;
+                const commentId = req.params.commentId;
+                const userEmail = req.user.email;
+
+                const post = await forumCollection.findOne({ _id: new ObjectId(postId) });
+                if (!post) return res.status(404).json({ error: "Post not found." });
+
+                const comment = post.comments?.find((c) => c._id === commentId);
+                if (!comment) return res.status(404).json({ error: "Comment not found." });
+
+                // Only the author can delete their own comment
+                if (comment.authorEmail !== userEmail) {
+                    return res.status(403).json({ error: "You can only delete your own comments." });
+                }
+
+                await forumCollection.updateOne(
+                    { _id: new ObjectId(postId) },
+                    { $pull: { comments: { _id: commentId } } }
+                );
+
+                res.status(200).json({ success: true });
+            } catch (error) {
+                console.error("Error deleting comment:", error);
+                res.status(500).json({ error: "Failed to delete comment." });
+            }
+        });
+
+        // ── POST: Add a reply to a comment ─────────────────────────────────────────────
+        app.post('/api/forum-posts/:id/comments/:commentId/replies', verifyToken, async (req, res) => {
+            try {
+                const postId = req.params.id;
+                const commentId = req.params.commentId;
+                const userEmail = req.user.email;
+                const { text } = req.body;
+
+                if (!text || text.trim().length === 0) {
+                    return res.status(400).json({ error: "Reply text is required." });
+                }
+
+                const dbUser = await usersCollection.findOne({ email: userEmail });
+                if (dbUser?.status === 'blocked') {
+                    return res.status(403).json({ error: "Action restricted by Admin." });
+                }
+
+                const newReply = {
+                    _id: new ObjectId().toString(),
+                    authorName: dbUser?.name || req.user.name || "User",
+                    authorEmail: userEmail,
+                    authorImage: dbUser?.image || req.user.image || null,
+                    text: text.trim(),
+                    createdAt: new Date(),
+                };
+
+                // Push reply into the specific comment's replies array
+                await forumCollection.updateOne(
+                    { _id: new ObjectId(postId), "comments._id": commentId },
+                    { $push: { "comments.$.replies": newReply } }
+                );
+
+                res.status(201).json({ success: true, reply: newReply });
+            } catch (error) {
+                console.error("Error posting reply:", error);
+                res.status(500).json({ error: "Failed to post reply." });
+            }
+        });
+
+        // ── DELETE: Delete own reply ───────────────────────────────────────────────────
+        app.delete('/api/forum-posts/:id/comments/:commentId/replies/:replyId', verifyToken, async (req, res) => {
+            try {
+                const postId = req.params.id;
+                const commentId = req.params.commentId;
+                const replyId = req.params.replyId;
+                const userEmail = req.user.email;
+
+                const post = await forumCollection.findOne({ _id: new ObjectId(postId) });
+                if (!post) return res.status(404).json({ error: "Post not found." });
+
+                const comment = post.comments?.find((c) => c._id === commentId);
+                if (!comment) return res.status(404).json({ error: "Comment not found." });
+
+                const reply = comment.replies?.find((r) => r._id === replyId);
+                if (!reply) return res.status(404).json({ error: "Reply not found." });
+
+                if (reply.authorEmail !== userEmail) {
+                    return res.status(403).json({ error: "You can only delete your own replies." });
+                }
+
+                await forumCollection.updateOne(
+                    { _id: new ObjectId(postId), "comments._id": commentId },
+                    { $pull: { "comments.$.replies": { _id: replyId } } }
+                );
+
+                res.status(200).json({ success: true });
+            } catch (error) {
+                console.error("Error deleting reply:", error);
+                res.status(500).json({ error: "Failed to delete reply." });
+            }
+        });
+
 
     } finally {
         // Keep connection open
