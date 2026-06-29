@@ -620,25 +620,32 @@ async function run() {
                 const trainerId = req.params.id;
                 const requesterEmail = req.user.email;
 
-                // Verify admin role
                 const adminUser = await usersCollection.findOne({ email: requesterEmail });
                 if (!adminUser || adminUser.role !== 'admin') {
                     return res.status(403).json({ error: "Access forbidden: Requires Administrator privileges." });
                 }
 
-                // Find the trainer
                 const trainer = await usersCollection.findOne({ _id: new ObjectId(trainerId) });
-                if (!trainer) {
-                    return res.status(404).json({ error: "Trainer not found." });
-                }
-                if (trainer.role !== 'trainer') {
-                    return res.status(400).json({ error: "This user is not a trainer." });
-                }
+                if (!trainer) return res.status(404).json({ error: "Trainer not found." });
+                if (trainer.role !== 'trainer') return res.status(400).json({ error: "This user is not a trainer." });
 
-                // Demote to user
+                // 1. Demote role to user
                 await usersCollection.updateOne(
                     { _id: new ObjectId(trainerId) },
                     { $set: { role: "user", updatedAt: new Date() } }
+                );
+
+                // 2. Also update their latest approved application to "demoted"
+                //    so the dashboard doesn't show stale "approved" status
+                await applicationsCollection.updateOne(
+                    { applicantEmail: trainer.email, status: "approved" },
+                    {
+                        $set: {
+                            status: "rejected",
+                            adminFeedback: "Your trainer privileges have been removed by an Admin.",
+                            decidedAt: new Date()
+                        }
+                    }
                 );
 
                 res.status(200).json({ success: true, message: "Trainer demoted to user." });
@@ -1179,7 +1186,6 @@ async function run() {
             try {
                 const userEmail = req.user.email;
                 const { classId } = req.body;
-
                 if (!classId) {
                     return res.status(400).json({ error: "Class ID is required." });
                 }
@@ -1188,6 +1194,9 @@ async function run() {
                 const dbUser = await usersCollection.findOne({ email: userEmail });
                 if (!dbUser) return res.status(404).json({ error: "User not found." });
                 if (dbUser.status === 'blocked') return res.status(403).json({ error: "Action restricted by Admin." });
+                if (dbUser.role === 'admin' || dbUser.role === 'trainer') {
+                    return res.status(403).json({ error: "Admins and trainers cannot book classes." });
+                }
 
                 // 2. Fetch class from DB
                 const { ObjectId } = require('mongodb');
