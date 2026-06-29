@@ -15,6 +15,9 @@ app.use(express.json());
 
 const uri = process.env.MONGODB_URI;
 
+const Stripe = require('stripe');
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+
 const client = new MongoClient(uri, {
     serverApi: {
         version: ServerApiVersion.v1,
@@ -65,6 +68,7 @@ async function run() {
         const usersCollection = db.collection("user");
         const forumCollection = db.collection("forum");
         const applicationsCollection = db.collection("trainer-applications");
+        const bookingsCollection = db.collection("bookings");
 
         console.log("Pinged your deployment. You successfully connected to MongoDB!");
 
@@ -1169,6 +1173,182 @@ async function run() {
                 res.status(500).json({ error: "Failed to delete reply." });
             }
         });
+
+        // ── POST: Create a Stripe Checkout Session ────────────────────────────────────
+        app.post('/api/payment/create-checkout-session', verifyToken, async (req, res) => {
+            try {
+                const userEmail = req.user.email;
+                const { classId } = req.body;
+
+                if (!classId) {
+                    return res.status(400).json({ error: "Class ID is required." });
+                }
+
+                // 1. Fetch user from DB
+                const dbUser = await usersCollection.findOne({ email: userEmail });
+                if (!dbUser) return res.status(404).json({ error: "User not found." });
+                if (dbUser.status === 'blocked') return res.status(403).json({ error: "Action restricted by Admin." });
+
+                // 2. Fetch class from DB
+                const { ObjectId } = require('mongodb');
+                const classData = await classesCollection.findOne({ _id: new ObjectId(classId) });
+                if (!classData) return res.status(404).json({ error: "Class not found." });
+                if (classData.status !== 'approved') return res.status(400).json({ error: "This class is not available for booking." });
+
+                // 3. Check if user already booked this class
+                const existingBooking = await bookingsCollection.findOne({
+                    classId,
+                    userEmail,
+                });
+                if (existingBooking) {
+                    return res.status(400).json({ error: "You have already booked this class." });
+                }
+
+                // 4. Create Stripe Checkout Session
+                const session = await stripe.checkout.sessions.create({
+                    payment_method_types: ["card"],
+                    mode: "payment",
+                    line_items: [
+                        {
+                            price_data: {
+                                currency: "usd",
+                                product_data: {
+                                    name: classData.className,
+                                    description: `Trainer: ${classData.trainerName}`,
+                                    images: classData.image ? [classData.image] : [],
+                                },
+                                unit_amount: Math.round(classData.price * 100), // Stripe uses cents
+                            },
+                            quantity: 1,
+                        },
+                    ],
+                    // Stripe redirects here after payment
+                    success_url: `${process.env.CLIENT_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
+                    cancel_url: `${process.env.CLIENT_URL}/class/${classId}`,
+                    // Store metadata so we can save booking after payment
+                    metadata: {
+                        classId,
+                        userEmail,
+                        userName: dbUser.name || "User",
+                        trainerName: classData.trainerName,
+                        className: classData.className,
+                        price: classData.price.toString(),
+                    },
+                });
+
+                res.status(200).json({ url: session.url, sessionId: session.id });
+
+            } catch (error) {
+                console.error("Stripe session error:", error);
+                res.status(500).json({ error: "Failed to create checkout session." });
+            }
+        });
+
+        // ── GET: Verify payment success and save booking ──────────────────────────────
+        // Called after Stripe redirects to /payment/success?session_id=xxx
+        app.get('/api/payment/verify', verifyToken, async (req, res) => {
+            try {
+                const { session_id } = req.query;
+                if (!session_id) return res.status(400).json({ error: "Session ID missing." });
+
+                // 1. Retrieve the session from Stripe
+                const session = await stripe.checkout.sessions.retrieve(session_id);
+
+                if (session.payment_status !== "paid") {
+                    return res.status(400).json({ error: "Payment not completed." });
+                }
+
+                const { classId, userEmail, userName, trainerName, className, price } = session.metadata;
+
+                // 2. Check if booking already saved (prevent double-save on refresh)
+                const existingBooking = await bookingsCollection.findOne({ stripeSessionId: session_id });
+                if (existingBooking) {
+                    return res.status(200).json({ success: true, alreadySaved: true, booking: existingBooking });
+                }
+
+                // 3. Save booking to DB
+                const newBooking = {
+                    classId,
+                    userEmail,
+                    userName,
+                    className,
+                    trainerName,
+                    price: parseFloat(price),
+                    stripeSessionId: session_id,
+                    paymentStatus: "paid",
+                    bookedAt: new Date(),
+                };
+
+                await bookingsCollection.insertOne(newBooking);
+
+                // 4. Increment bookingCount on the class
+                const { ObjectId } = require('mongodb');
+                await classesCollection.updateOne(
+                    { _id: new ObjectId(classId) },
+                    { $inc: { bookingCount: 1 } }
+                );
+
+                res.status(200).json({ success: true, booking: newBooking });
+
+            } catch (error) {
+                console.error("Payment verify error:", error);
+                res.status(500).json({ error: "Failed to verify payment." });
+            }
+        });
+
+        // ── GET: Fetch all bookings for admin transactions page ───────────────────────
+        app.get('/api/admin/transactions', verifyToken, async (req, res) => {
+            try {
+                const requesterEmail = req.user.email;
+                const adminUser = await usersCollection.findOne({ email: requesterEmail });
+                if (!adminUser || adminUser.role !== 'admin') {
+                    return res.status(403).json({ error: "Access forbidden: Requires Administrator privileges." });
+                }
+
+                const transactions = await bookingsCollection
+                    .find({})
+                    .sort({ bookedAt: -1 })
+                    .toArray();
+
+                res.status(200).json(transactions);
+            } catch (error) {
+                console.error("Error fetching transactions:", error);
+                res.status(500).json({ error: "Failed to load transactions." });
+            }
+        });
+
+        // ── GET: Fetch bookings for a specific user (booked classes dashboard) ─────────
+        app.get('/api/my-bookings', verifyToken, async (req, res) => {
+            try {
+                const userEmail = req.user.email;
+                const bookings = await bookingsCollection
+                    .find({ userEmail })
+                    .sort({ bookedAt: -1 })
+                    .toArray();
+                res.status(200).json(bookings);
+            } catch (error) {
+                console.error("Error fetching bookings:", error);
+                res.status(500).json({ error: "Failed to load bookings." });
+            }
+        });
+
+        app.get('/api/bookings/check/:classId', verifyToken, async (req, res) => {
+            try {
+                const userEmail = req.user.email;
+                const { classId } = req.params;
+
+                const existingBooking = await bookingsCollection.findOne({
+                    classId,
+                    userEmail,
+                });
+
+                res.status(200).json({ isBooked: !!existingBooking });
+            } catch (error) {
+                console.error("Error checking booking:", error);
+                res.status(500).json({ error: "Failed to check booking status." });
+            }
+        });
+
 
 
     } finally {
