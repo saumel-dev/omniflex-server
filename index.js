@@ -59,9 +59,9 @@ const verifyToken = async (req, res, next) => {
     }
 };
 
-async function run() {
-    try {
-        await client.connect();
+// async function run() {
+//     try {
+//         await client.connect();
         const db = client.db("omniflex");
 
         const classesCollection = db.collection("classes");
@@ -1274,6 +1274,8 @@ async function run() {
                 if (existingBooking) {
                     return res.status(200).json({ success: true, alreadySaved: true, booking: existingBooking });
                 }
+                const { ObjectId } = require('mongodb');
+                const classData = await classesCollection.findOne({ _id: new ObjectId(classId) });
 
                 // 3. Save booking to DB
                 const newBooking = {
@@ -1283,6 +1285,8 @@ async function run() {
                     className,
                     trainerName,
                     price: parseFloat(price),
+                    image: classData?.image || null,
+                    category: classData?.category || null,
                     stripeSessionId: session_id,
                     paymentStatus: "paid",
                     bookedAt: new Date(),
@@ -1291,7 +1295,6 @@ async function run() {
                 await bookingsCollection.insertOne(newBooking);
 
                 // 4. Increment bookingCount on the class
-                const { ObjectId } = require('mongodb');
                 await classesCollection.updateOne(
                     { _id: new ObjectId(classId) },
                     { $inc: { bookingCount: 1 } }
@@ -1360,11 +1363,11 @@ async function run() {
 
 
 
-    } finally {
-        // Keep connection open
-    }
-}
-run().catch(console.dir);
+//     } finally {
+//         // Keep connection open
+//     }
+// }
+// run().catch(console.dir);
 
 app.get('/', (req, res) => {
     res.send('Hello World!');
